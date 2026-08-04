@@ -66,6 +66,7 @@ import os
 import re
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from scipy.stats import linregress
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

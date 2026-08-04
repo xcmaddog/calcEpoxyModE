@@ -24,3 +24,6 @@ data/
 
 # don't upload Trial_Run_Measurements.csv
 Trial_Run_Measurements.csv
+
+#don't upload plots
+*.png

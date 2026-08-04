@@ -5,7 +5,7 @@
 To use the script it should be in a folder along with two other things:
 
 - A "data" folder which will contain the csv data from the compression tests.
-- A csv titled Trail_Run_Measurements.csv
+- A csv titled Trial_Run_Measurements.csv
 
-Trail_Run_Measurements.csv should have 4 columns:
+Trial_Run_Measurements.csv should have 4 columns:
 File Name, Diameter, Length, and epsilon L

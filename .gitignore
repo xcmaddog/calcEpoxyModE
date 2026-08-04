@@ -22,5 +22,5 @@ Thumbs.db
 # don't upload the data folder
 data/
 
-# don't upload Trail_Run_Measurements.csv
-Trail_Run_Measurements.csv
+# don't upload Trial_Run_Measurements.csv
+Trial_Run_Measurements.csv

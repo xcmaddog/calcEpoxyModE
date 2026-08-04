@@ -70,7 +70,7 @@ from scipy.stats import linregress
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "data")
-MEASUREMENTS_CSV = os.path.join(SCRIPT_DIR, "Trail_Run_Measurements.csv")
+MEASUREMENTS_CSV = os.path.join(SCRIPT_DIR, "Trial_Run_Measurements.csv")
 
 IN_TO_MM = 25.4
 PRELOAD_RANGE_N = (40.0, 60.0)   # expected Force at the very first sample
@@ -246,7 +246,59 @@ def analyze(sample_name):
         "toe_compensated_strain_zero": strain_axis_intercept,
         "E_GPa": sig_figs(E_GPa),
         "E_psi": sig_figs(E_psi),
+        # Full curve + fit details, for plotting.
+        "strain": strain,
+        "stress_MPa": stress_MPa,
+        "fit_start_idx": start,
+        "fit_end_idx": end,
+        "fit_slope": fit.slope,
+        "fit_intercept": fit.intercept,
     }
+
+
+def plot_stress_strain(results, save_path=None, show=True):
+    """
+    Plots the full stress-strain curve, highlights the window used for the
+    modulus fit, and draws that fit's tangent line (extended back to the
+    strain axis, so the toe-compensation is visible).
+    """
+    import matplotlib.pyplot as plt
+
+    strain = results["strain"]
+    stress = results["stress_MPa"]
+    start, end = results["fit_start_idx"], results["fit_end_idx"]
+    slope, intercept = results["fit_slope"], results["fit_intercept"]
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot(strain, stress, color="0.6", lw=1, label="Full curve")
+    ax.plot(strain[start:end], stress[start:end], color="tab:red", lw=2.5,
+             label="Region used for E fit")
+
+    # Tangent line, extended from the strain-axis intercept through a bit
+    # past the fit window, so the toe compensation is visible.
+    x0 = results["toe_compensated_strain_zero"]
+    x1 = strain[end - 1] * 1.15
+    xs = np.array([x0, x1])
+    ax.plot(xs, slope * xs + intercept, "--", color="tab:blue", lw=1.5,
+             label="Tangent (extended)")
+    ax.axhline(0, color="black", lw=0.8)
+    ax.plot(x0, 0, "o", color="tab:blue", ms=5)
+
+    ax.set_xlabel("Engineering strain (mm/mm)")
+    ax.set_ylabel("Engineering stress (MPa)")
+    ax.set_title(
+        f"{results['sample']}: E = {results['E_GPa']} GPa "
+        f"(R^2 = {results['fit_r_squared']:.4f})"
+    )
+    ax.legend()
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150)
+        print(f"Plot saved to {save_path}")
+    if show:
+        plt.show()
+    plt.close(fig)
 
 
 def main():
@@ -268,6 +320,12 @@ def main():
     print()
     print(f"Modulus of Elasticity:      {results['E_GPa']} GPa  "
           f"({results['E_psi']} psi)")
+
+    show_plot = input("\nShow stress/strain plot? (y/n): ").strip().lower()
+    if show_plot.startswith("y"):
+        safe_name = re.sub(r"[^\w\-]+", "_", results["sample"])
+        save_path = os.path.join(SCRIPT_DIR, f"{safe_name}_stress_strain.png")
+        plot_stress_strain(results, save_path=save_path)
 
 
 if __name__ == "__main__":

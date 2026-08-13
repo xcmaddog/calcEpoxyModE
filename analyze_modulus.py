@@ -311,7 +311,7 @@ def main():
     print(f"Sample:                     {results['sample']}")
     print(f"Diameter:                   {results['diameter_in']:.4f} in")
     print(f"Length:                     {results['length_in']:.4f} in")
-    print(f"Extensometer gauge length:  {results['gauge_length_mm']:.3f} mm")
+    #print(f"Extensometer gauge length:  {results['gauge_length_mm']:.3f} mm")
     print(f"Cross-sectional area:       {results['area_mm2']:.4f} mm^2")
     print(f"Initial (preload) force:    {results['initial_force_N']:.2f} N")
     print(f"Linear-fit strain range:    {results['fit_strain_range'][0]:.5f} to "

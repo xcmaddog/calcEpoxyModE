@@ -4,7 +4,12 @@ analyze_modulus.py
 Extracts the Modulus of Elasticity (E) from a cylindrical compression-test
 CSV exported by the MTS TestSuite DAQ, using extensometer strain directly.
 
-Expected test-data file layout (in DATA_DIR, one file per sample):
+Expected test-data file layout (in DATA_DIR, one file per sample) --
+this now comes in two flavors and the loader auto-detects which one it's
+looking at, by scanning for the header row (the one containing
+"Displacement") rather than assuming a fixed number of preamble lines:
+
+  Old format (Test/Test Run/Date preamble):
     line 1: File Path: ...
     line 2: Test: ...
     line 3: Test Run: ...
@@ -15,14 +20,27 @@ Expected test-data file layout (in DATA_DIR, one file per sample):
     line 8: sec, mm, N, %                                    <- units
     line 9+: data
 
+  New format (no preamble):
+    line 1: Time, Displacement, Force, Force 3
+    line 2: (s), (mm), (N), (lbf)                             <- units
+    line 3+: data
+
+  Both formats have the same *column order* (time, displacement, force,
+  extensometer channel), which is all the loader actually relies on -- it
+  reads by position, not by header name. That matters because the new
+  format's 4th column is labeled "Force 3 (lbf)", but it is NOT a force:
+  it's the same extensometer strain reading as before (in %), just on a
+  channel that never got relabeled after being repurposed. The loader
+  treats it as strain_pct regardless of what the header claims.
+
 Expected measurements file (MEASUREMENTS_CSV, one row per sample):
     File Name, Diameter, Length, epsilon L
     Trial Run 1, 0.496, 0.9245, 9.65
     ...
     Diameter and Length are in inches. epsilon L is the extensometer's
     gauge length in mm -- it isn't used in the modulus calculation
-    (Axial AI1_AOX is already true engineering strain, just in percent),
-    it's just carried through and reported for the record.
+    (the strain channel is already true engineering strain, just in
+    percent), it's just carried through and reported for the record.
 
     "File Name" is matched against the sample name loosely: underscores
     and extra whitespace are treated the same, and matching is case
@@ -67,7 +85,8 @@ import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.stats import linregress
+from scipy.signal import savgol_filter
+from scipy.stats import linregress, rankdata
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "data")
@@ -80,6 +99,22 @@ MACHINE_NOISE_N = 6.0            # ~1 std of Force noise on this machine
 
 def _normalize_name(name):
     return re.sub(r"[\s_]+", " ", name).strip().lower()
+
+
+def _detect_data_start(path):
+    """
+    Finds where the actual data starts by locating the header row (the
+    one naming the columns) rather than assuming a fixed preamble length
+    -- old-format files have a 6-line Test/Test Run/Date preamble before
+    it, new-format files have none. "Displacement" is used as the anchor
+    because it appears verbatim in both formats' header row and nowhere
+    else in the preamble.
+    """
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
+        for i, line in enumerate(fh):
+            if "displacement" in line.lower():
+                return i + 2  # skip the header line and the units line after it
+    raise ValueError(f"Could not find a header row containing 'Displacement' in {path}")
 
 
 def load_test_data(sample_name):
@@ -96,9 +131,12 @@ def load_test_data(sample_name):
             f"Available samples: {', '.join(sorted(candidates)) if candidates else '(none found)'}"
         )
 
+    path = os.path.join(DATA_DIR, match)
+    skip = _detect_data_start(path)
+
     df = pd.read_csv(
-        os.path.join(DATA_DIR, match),
-        skiprows=8,
+        path,
+        skiprows=skip,
         names=["time_s", "displacement_mm", "force_N", "strain_pct"],
         header=None,
     )
@@ -163,41 +201,89 @@ def check_preload(force):
         )
 
 
-def best_linear_window(strain, stress, min_frac=0.20, step_frac=0.01,
-                        max_start_frac=0.40):
+def find_modulus_window(strain, stress, win_frac=0.08, smooth_frac=0.06,
+                         min_start_frac=0.04, max_start_frac=0.45):
     """
-    Slides a window over the *early* portion of the loading curve and
-    returns the (r_squared, start, end) of the best linear fit.
+    Finds the modulus window by scoring every candidate point on two
+    things at once, rather than using one to gate the other:
+      - the local derivative of the *smoothed* stress-strain curve
+        (Savitzky-Golay on both strain and stress, then a finite
+        difference) -- a stable stand-in for "how steep is it here",
+      - the R^2 of a window centered on that point, evaluated against
+        the *raw, unsmoothed* data -- "how trustworthy is a straight-line
+        reading here".
+    Both series are converted to percentile ranks (0-1, robust to
+    outliers -- see below) and summed; the point with the highest
+    combined rank wins, and its window (fit on raw data) is the answer.
 
-    Two restrictions matter here, both learned from a specimen that never
-    showed a clear peak/failure within the recorded range:
-      - Candidate windows are only searched for before `peak_idx` (avoid
-        post-yield / failure data), same as before.
-      - Window *start* positions are additionally restricted to the first
-        `max_start_frac` of that pre-peak range. Without this, a short
-        window can land a spuriously high R^2 on some flat-ish patch deep
-        into the test that has nothing to do with the true initial
-        (linear-elastic) region -- which is specifically what "initial
-        linear portion" in the tangent-modulus method means.
+    Candidates are restricted to `min_start_frac`-`max_start_frac` of the
+    pre-peak range, to avoid the initial settling-artifact spike and
+    post-yield data, same as before.
+
+    Why rank, not min-max: an earlier version of this used plain min-max
+    normalization, and it broke on one A-series sample where the smoothed
+    derivative had a single point with a near-zero denominator (a tiny
+    but nonzero step in smoothed strain) blowing up to ~11 million, versus
+    tens or hundreds everywhere else. Min-max crushes everything else to
+    ~0 next to an outlier like that, so the "highest combined score" was
+    just that one degenerate point (R^2 ~ 0.03 -- pure noise). Percentile
+    rank only cares about ordering, so one absurd value can't dominate --
+    it's still an outlier, but it just ranks 1st out of n rather than
+    rescaling everything else into irrelevance.
+
+    This replaced an earlier version that required R^2 > 0.95 outright
+    and fell back to a plain best-R^2 search when nothing cleared that
+    bar -- which happened on a B-6 sample whose best achievable R^2
+    anywhere in the valid range was ~0.84. This scoring approach doesn't
+    need a fallback: it always has a well-defined best point, and it
+    happened to land within 1% of that sample's previously-known value.
     """
     peak_idx = int(np.argmax(stress))
     n = peak_idx
     if n < 20:
         raise RuntimeError("Not enough pre-peak data to fit a linear region.")
 
-    win = max(10, int(n * min_frac))
-    step = max(1, int(n * step_frac))
-    max_start = max(1, min(n - win, int(n * max_start_frac)))
+    win = max(10, int(n * win_frac))
+    half = win // 2
+    smooth_w = max(11, int(n * smooth_frac))
+    if smooth_w % 2 == 0:
+        smooth_w += 1
+    smooth_w = min(smooth_w, n - 1 if (n - 1) % 2 == 1 else n - 2)
 
-    best = None
-    for start in range(0, max_start, step):
-        end = start + win
+    strain_s = savgol_filter(strain[:n], smooth_w, 3)
+    stress_s = savgol_filter(stress[:n], smooth_w, 3)
+    d_strain = np.diff(strain_s)
+    d_stress = np.diff(stress_s)
+    d_strain = np.where(np.abs(d_strain) < 1e-12, 1e-12, d_strain)
+    deriv = d_stress / d_strain  # smoothed local slope, length n-1
+
+    lo = int(n * min_start_frac)
+    hi = min(int(n * max_start_frac), len(deriv))
+    if hi <= lo:
+        raise RuntimeError("min_start_frac/max_start_frac leave no candidates.")
+
+    idxs = np.arange(lo, hi)
+    r2_vals = np.full(len(idxs), np.nan)
+    for j, i in enumerate(idxs):
+        start = max(0, i - half)
+        end = min(n, start + win)
+        if end - start < 10:
+            continue
         result = linregress(strain[start:end], stress[start:end])
-        r2 = result.rvalue ** 2
-        if best is None or r2 > best[0]:
-            best = (r2, start, end)
+        r2_vals[j] = result.rvalue ** 2
 
-    return best
+    valid = ~np.isnan(r2_vals)
+    idxs, r2_vals, deriv_vals = idxs[valid], r2_vals[valid], deriv[idxs[valid]]
+
+    r2_rank = (rankdata(r2_vals) - 1) / (len(r2_vals) - 1)
+    deriv_rank = (rankdata(deriv_vals) - 1) / (len(deriv_vals) - 1)
+    best_j = np.argmax(r2_rank + deriv_rank)
+    best_i = idxs[best_j]
+
+    start = max(0, best_i - half)
+    end = min(n, start + win)
+    result = linregress(strain[start:end], stress[start:end])
+    return result.rvalue ** 2, start, end
 
 
 def sig_figs(x, n=3):
@@ -226,7 +312,7 @@ def analyze(sample_name):
     strain = (strain_pct - strain0_pct) / 100.0   # true strain, mm/mm
     stress_MPa = force / area_mm2                 # N/mm^2 = MPa
 
-    r2, start, end = best_linear_window(strain, stress_MPa)
+    r2, start, end = find_modulus_window(strain, stress_MPa)
     fit = linregress(strain[start:end], stress_MPa[start:end])
 
     E_MPa = fit.slope
